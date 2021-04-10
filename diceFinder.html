@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <title>Dice Point Finder</title>
+    </head>
+    <body>
+        <div id="container" style="width: 600px; height: 400px; display: inline-block;"></div>
+        <div id="inputs">
+            <label for="sides">Number of Sides</label>
+            <input type="range" min="2" max="100" value="7" class="slider" id="sides">
+            <span id="sideCount">7</span>
+            <label for="cutoff">Cutoff Threshold</label>
+            <input type="number" id="cutoff" value="0.000017">
+            <button id="start">Start</button>
+            <button id="reset">Reset</button>
+        </div>
+        <div id="outputs">
+            <h2 id="status"></h2>
+            <div id="framecount"></div>
+            <div id="delta"></div>
+            <h2>Cartesian Coordinates</h2>
+            <ul id="cartcoordinates"></ul>
+            <h2>Spherical Coordinates</h2>
+            <ul id="spherecoordinates"></ul>
+        </div>
+
+        <script type="module">
+            import * as THREE from 'https://unpkg.com/three@0.127.0/build/three.module.js'
+            import { OrbitControls } from 'https://unpkg.com/three@0.127.0/examples/jsm/controls/OrbitControls.js'
+
+            //How big the base sphere is, mostly for display
+            const radius = 50;
+            //Number of sides/points to work with
+            var pointCount;
+            //Multiplies the step about by this. Bigger moves faster, but may not converge. Low may take longer. Too low and it may not converge, too
+            var stepMultiple = 1;
+            //Movement delta at which we'll stop processing. Higher is faster, lower is more accurate and less likely to converge
+            var cutoff = 0.000017;
+
+            var running = false;
+            var frameCount = 0;
+            var scene, camera, renderer, container, controls;
+            var points = [];
+
+            function setup() {
+                var WIDTH = 600, HEIGHT = 400;
+                var VIEW_ANGLE = 45,
+                    ASPECT = WIDTH/HEIGHT,
+                    NEAR = 0.1,
+                    FAR = 10000;
+                container = document.getElementById("container");
+                renderer = new THREE.WebGLRenderer();
+                camera = new THREE.PerspectiveCamera(VIEW_ANGLE, ASPECT, NEAR, FAR);
+
+                scene = new THREE.Scene();
+
+                camera.position.z = 300;
+                renderer.setSize(WIDTH, HEIGHT);
+                container.append(renderer.domElement);
+
+                controls = new OrbitControls(camera, renderer.domElement);
+                controls.update();
+            }
+
+            function createObjects() {
+                var sphereMaterial = new THREE.MeshLambertMaterial({color:0xcc0000});
+                var segments = 16, rings = 16;
+                var sphere = new THREE.Mesh(
+                    new THREE.SphereGeometry(radius, segments, rings),
+                    sphereMaterial
+                );
+                scene.add(sphere);
+
+                const light = new THREE.AmbientLight(0xAAAAAA);
+                scene.add(light);
+                var pointLight = new THREE.PointLight(0xFFFFFF);
+                pointLight.position.x = 10;
+                pointLight.position.y = 50;
+                pointLight.position.z = 130;
+                scene.add(pointLight);
+            }
+
+            function animate() {
+                requestAnimationFrame(animate);
+                if(running) {
+                    pushPoints();
+                }
+                controls.update();
+                renderer.render(scene, camera);
+            }
+
+            function createPoints() {
+                for(var i = 0; i < pointCount; i++) {
+                    var point = new THREE.Mesh(
+                        new THREE.SphereGeometry(2, 16, 16),
+                        new THREE.MeshLambertMaterial({color: 0x00cc00})
+                    );
+                    const startPosition = {theta: 0, phi: 0, r:radius};
+                    startPosition.theta = Math.random() * Math.PI;
+                    startPosition.phi = Math.random() * Math.PI;
+                    const position = sphereToCart(startPosition);
+
+                    point.position.x = position.x;
+                    point.position.y = position.y;
+                    point.position.z = position.z;
+                    points.push(point);
+                    scene.add(point);
+                }
+            }
+
+            function pushPoints() {
+                var movementDelta = 0;
+                for(var i = 0; i<points.length; i++) {
+                    const totalForce = {x:0, y:0, z:0, total:0 };
+                    const currPoint = points[i];
+                    for(var j = 0; j<points.length; j++) {
+                        if(i===j) continue;
+                        //calculate distance from current point to the one we are considering
+                        const force = {x:0, y:0, z:0 }
+                        force.x = currPoint.position.x - points[j].position.x;
+                        force.y = currPoint.position.y - points[j].position.y;
+                        force.z = currPoint.position.z - points[j].position.z;
+                        //force is 1/√d, so scale distance by this force
+                        const scaler = 1 / magnitude(force);
+                        force.x = force.x * scaler;
+                        force.y = force.y * scaler;
+                        force.z = force.z * scaler;
+                        //total all the separate forces for this partical;
+                        totalForce.x += force.x;
+                        totalForce.y += force.y;
+                        totalForce.z += force.z;
+                    }
+                    //calculate the total force, which is already scaled by distance
+                    totalForce.total = magnitude(totalForce);
+                    //Push each point realitive to the force on them, scaled by a step factor so they don't go flying
+                    var stepSize = stepMultiple * totalForce.total;
+                    var push = {
+                        x: currPoint.position.x + totalForce.x * stepSize,
+                        y: currPoint.position.y + totalForce.y * stepSize,
+                        z: currPoint.position.z + totalForce.z * stepSize
+                    }
+                    //the point in 'push' is not necessarily on the surface of the target sphere, so convert to sphereical coordinates, then force the radius to be on the surface
+                    var pushSphere = cartToSphere(push);
+                    pushSphere.r = radius;
+                    //this should be about the closest point on the sphere to the desired location
+                    var newPosition = sphereToCart(pushSphere);
+
+                    //calculate delta on the position
+                    const deltaCoords = {
+                        x: Math.abs(currPoint.position.x - newPosition.x),
+                        y: Math.abs(currPoint.position.y - newPosition.y),
+                        z: Math.abs(currPoint.position.z - newPosition.z)
+                    };
+                    const delta = magnitude(deltaCoords);
+                    movementDelta += delta;
+                    //update the point to the new position. This will effect later points, but we don't need a fully accurate simulation, as we just want stability
+                    currPoint.position.x = newPosition.x;
+                    currPoint.position.y = newPosition.y;
+                    currPoint.position.z = newPosition.z;
+                }
+                //Once we haven't moved much, consider it stable and stop
+                if(movementDelta < cutoff) {
+                    stopPushing();
+                }
+
+                frameCount ++;
+                document.getElementById("framecount").textContent = frameCount;
+                document.getElementById("delta").textContent = movementDelta;
+            }
+
+            function cartToSphere(position) {
+                const output = {theta: 0, phi: 0, r:0 };
+                var mag = magnitude(position);
+                output.theta = Math.atan2(position.y, position.x);
+                output.phi   = Math.acos(position.z / mag);
+                output.r     = mag;
+                return output;
+            }
+
+            function sphereToCart(position) {
+                const output ={ x:0, y:0, z:0 };
+                output.x = position.r * Math.sin(position.phi) * Math.cos(position.theta);
+                output.y = position.r * Math.sin(position.phi) * Math.sin(position.theta);
+                output.z = position.r * Math.cos(position.phi);
+                return output;
+            }
+
+            function magnitude(position) {
+                return Math.sqrt(position.x**2 + position.y**2 + position.z**2);
+            }
+
+            function outputCoordinates() {
+                document.getElementById("status").innerText="Finished";
+                var cartOutput = document.getElementById("cartcoordinates");
+                cartOutput.textContent = "";
+                for(var i = 0; i<points.length; i++) {
+                    var li = document.createElement("li");
+                    var text = `${points[i].position.x}, ${points[i].position.y}, ${points[i].position.z}`
+                    li.textContent = text;
+                    cartOutput.appendChild(li);
+                }
+                var sphereOutput = document.getElementById("spherecoordinates");
+                sphereOutput.textContent = "";
+                for(var i = 0; i<points.length; i++) {
+                    var coordinates = cartToSphere(points[i].position);
+                    var li = document.createElement("li");
+                    var text = `${coordinates.theta}, ${coordinates.phi}, ${coordinates.r}`
+                    li.textContent = text;
+                    sphereOutput.appendChild(li);
+                }
+            }
+
+            function stopPushing() {
+                document.getElementById("start").textContent = "start";
+                document.getElementById("status").textContent = "Stopped";
+                running = false;
+                outputCoordinates();
+            }
+
+            function reset() {
+                document.getElementById("start").textContent = "start";
+                document.getElementById("status").textContent = "Stopped";
+                running = false;
+                for(var i = 0; i<points.length; i++) {
+                    scene.remove(points[i]);
+                }
+                points = [];
+                frameCount = 0;
+                running = false;
+            }
+
+            function start() {
+                reset();
+                document.getElementById("start").textContent = "stop";
+                document.getElementById("status").textContent = "Running...";
+                pointCount = document.getElementById("sides").value;
+                cutoff = document.getElementById("cutoff").value;
+                running = true;
+                createPoints();
+            }
+
+            function toggle() {
+                if(running) {
+                    stopPushing();
+                } else {
+                    start();
+                }
+            }
+
+            function updateSideCount() {
+                document.getElementById("sideCount").textContent = document.getElementById("sides").value;
+            }
+
+            setup();
+            createObjects();
+            animate();
+            document.getElementById("start").addEventListener("click", toggle);
+            document.getElementById("reset").addEventListener("click", reset);
+            document.getElementById("sides").addEventListener("input", updateSideCount);
+
+        </script>
+    </body>
+</html>
